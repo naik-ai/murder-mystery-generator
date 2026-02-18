@@ -887,28 +887,95 @@ export default function GenerationWizard() {
 
   const handleGenerate = async () => {
     setIsGenerating(true);
+    setProgress({
+      stage: "story",
+      percent: 0,
+      message: "Connecting to AI agents...",
+    });
 
-    // Simulate generation progress
-    const stages = ["story", "characters", "evidence", "validation"];
-    for (let i = 0; i < stages.length; i++) {
-      setProgress({
-        stage: stages[i],
-        percent: 0,
-        message: `Starting ${stages[i]}...`,
+    try {
+      const response = await fetch("/api/projects/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
       });
 
-      for (let p = 0; p <= 100; p += 10) {
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        setProgress({
-          stage: stages[i],
-          percent: p,
-          message: `Processing ${stages[i]}...`,
-        });
+      if (!response.ok) {
+        throw new Error("Failed to start generation");
       }
-    }
 
-    // Redirect to project on completion
-    router.push("/projects/demo-project");
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("No response body");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("event: generation")) {
+            const dataLine = line.split("\n").find((l) => l.startsWith("data: "));
+            if (dataLine) {
+              try {
+                const event = JSON.parse(dataLine.substring(6));
+
+                // Map event types to stage names
+                const agentToStage: Record<string, string> = {
+                  "story-architect": "story",
+                  "character-designer": "characters",
+                  "evidence-crafter": "evidence",
+                };
+
+                if (event.type === "agent_start" || event.type === "agent_progress" || event.type === "agent_complete") {
+                  const stage = event.agent ? (agentToStage[event.agent] || "validation") : "story";
+                  setProgress({
+                    stage,
+                    percent: event.progress || 0,
+                    message: event.message || "Processing...",
+                  });
+                } else if (event.type === "validation_start" || event.type === "validation_complete") {
+                  setProgress({
+                    stage: "validation",
+                    percent: event.progress || 0,
+                    message: event.message || "Validating...",
+                  });
+                } else if (event.type === "complete") {
+                  // Redirect to the new project
+                  const projectId = event.data?.project?.id;
+                  if (projectId) {
+                    router.push(`/projects/${projectId}`);
+                  } else {
+                    router.push("/projects");
+                  }
+                  return;
+                } else if (event.type === "error") {
+                  throw new Error(event.error || "Generation failed");
+                }
+              } catch (parseError) {
+                console.error("Failed to parse SSE event:", parseError);
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Generation error:", error);
+      setIsGenerating(false);
+      setProgress({
+        stage: "story",
+        percent: 0,
+        message: error instanceof Error ? error.message : "Generation failed",
+      });
+      // You could add a toast notification here
+    }
   };
 
   const renderStep = () => {
